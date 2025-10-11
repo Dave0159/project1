@@ -1,0 +1,270 @@
+import { db } from './firebase-config.js';
+import { doc, getDoc, updateDoc, collection, getDocs } from "https://www.gstatic.com/firebasejs/9.15.0/firebase-firestore.js";
+
+document.addEventListener('DOMContentLoaded', async () => {
+    // Navigasi
+    const menuBtn = document.getElementById('menu-btn');
+    const sideNav = document.getElementById('side-nav');
+    menuBtn.addEventListener('click', () => {
+        const isNavOpen = sideNav.style.width === '200px';
+        sideNav.style.width = isNavOpen ? '0' : '200px';
+        document.body.style.marginLeft = isNavOpen ? '0' : '200px';
+    });
+
+    // --- Inisialisasi Data ---
+    const urlParams = new URLSearchParams(window.location.search);
+    const playerId = urlParams.get('id');
+    let currentPlayer = null;
+    let allSkills = [];
+
+    if (!playerId) {
+        document.body.innerHTML = '<h1>Character ID not found.</h1>';
+        return;
+    }
+
+    // --- Elemen Halaman ---
+    const nameHeader = document.getElementById('player-name-header');
+    const description = document.getElementById('player-description');
+    const levelInput = document.getElementById('player-level');
+    const statsContainer = document.getElementById('stats-container');
+    const imagePreview = document.getElementById('player-image-preview');
+    const imageUploadInput = document.getElementById('image-upload');
+    const skillTreeContainer = document.getElementById('skill-tree-container');
+    const goldInput = document.getElementById('player-gold');
+    const inventoryList = document.getElementById('inventory-list');
+    const newItemInput = document.getElementById('new-item-input');
+    const addItemBtn = document.getElementById('add-item-btn');
+    const equipInventoryList = document.getElementById('equipment-inventory-list');
+    const createEquipBtn = document.getElementById('create-equip-btn');
+    const equipModal = document.getElementById('create-equip-modal');
+    const closeEquipModal = document.getElementById('close-equip-modal');
+    const equipForm = document.getElementById('create-equip-form');
+    const addStatBtn = document.getElementById('add-stat-btn');
+    const equipStatsContainer = document.getElementById('equip-stats-container');
+    const saveBtn = document.getElementById('save-changes-btn');
+    const learnSkillBtn = document.getElementById('learn-skill-btn');
+    const skillModal = document.getElementById('skill-modal');
+    const closeSkillModal = document.getElementById('close-skill-modal');
+    const skillModalTitle = document.getElementById('skill-modal-title');
+    const skillModalBody = document.getElementById('skill-modal-body');
+    const confirmLearnSkillBtn = document.getElementById('confirm-learn-skill-btn');
+    let newImageBase64 = null;
+
+    // --- Fungsi Render Tampilan ---
+    function calculateStatBonuses() {
+        const bonuses = { str: 0, agi: 0, dex: 0, def: 0, con: 0, int: 0 };
+        if (!currentPlayer.equipment) return bonuses;
+        for (const slot in currentPlayer.equipment) {
+            const item = currentPlayer.equipment[slot];
+            if (item && item.stats) {
+                item.stats.forEach(statBonus => {
+                    if (bonuses[statBonus.stat] !== undefined) {
+                        bonuses[statBonus.stat] += statBonus.value;
+                    }
+                });
+            }
+        }
+        return bonuses;
+    }
+
+    function renderStats() {
+        const bonuses = calculateStatBonuses();
+        statsContainer.innerHTML = '';
+        for (const stat in currentPlayer.stats) {
+            const baseValue = currentPlayer.stats[stat];
+            const bonusValue = bonuses[stat];
+            const statDiv = document.createElement('div');
+            statDiv.className = 'stat-item';
+            statDiv.innerHTML = `<label>${stat.toUpperCase()}:</label><div class="stat-value-editor"><button class="stat-change-btn" data-stat="${stat}" data-amount="-1">-</button><span>${baseValue}</span><button class="stat-change-btn" data-stat="${stat}" data-amount="1">+</button>${bonusValue > 0 ? `<span class="stat-bonus">(+${bonusValue})</span>` : ''}</div>`;
+            statsContainer.appendChild(statDiv);
+        }
+    }
+    
+    function renderEquippedItems() {
+        document.querySelectorAll('.equipment-slot').forEach(slot => {
+            const slotName = slot.dataset.slot;
+            const equippedItem = currentPlayer.equipment[slotName];
+            slot.className = 'equipment-slot';
+            if (equippedItem) {
+                let statsHtml = equippedItem.stats.map(s => `${s.stat.toUpperCase()} +${s.value}`).join(', ');
+                slot.innerHTML = `<button class="unequip-btn" data-slot="${slotName}">&times;</button><div class="item-name">${equippedItem.name}</div><div class="item-stats">${statsHtml}</div>`;
+                if (equippedItem.rarity) slot.classList.add(`slot-${equippedItem.rarity}`);
+            } else {
+                slot.innerHTML = `<span>${slotName.charAt(0).toUpperCase() + slotName.slice(1)}</span>`;
+            }
+        });
+    }
+
+    function renderEquipmentInventory() {
+        equipInventoryList.innerHTML = '';
+        if (!currentPlayer.equipmentInventory || currentPlayer.equipmentInventory.length === 0) {
+             equipInventoryList.innerHTML = '<li style="cursor: default; text-align: center; color: #888; justify-content: center;">Empty</li>';
+        } else {
+            currentPlayer.equipmentInventory.forEach(item => {
+                const li = document.createElement('li');
+                let statsHtml = item.stats.map(s => `${s.stat.toUpperCase()} +${s.value}`).join(', ');
+                li.innerHTML = `<div class="equip-item-info" data-item-id="${item.id}"><div class="equip-item-name">${item.name}<span class="rarity-tag rarity-${item.rarity || 'common'}">${(item.rarity || 'common').toUpperCase()}</span></div><div class="equip-item-details">${statsHtml}</div></div><button class="remove-equip-btn" data-item-id="${item.id}">&times;</button>`;
+                equipInventoryList.appendChild(li);
+            });
+        }
+    }
+    
+    function renderItemInventory() { /* ... (Fungsi ini tidak berubah) ... */ }
+    function renderSkillTree() { /* ... (Fungsi ini tidak berubah) ... */ }
+
+    async function loadCharacterDetails() {
+        nameHeader.textContent = currentPlayer.name;
+        description.value = currentPlayer.description;
+        levelInput.value = currentPlayer.level;
+        imagePreview.src = currentPlayer.image;
+        goldInput.value = currentPlayer.inventory.gold;
+        renderStats();
+        renderEquippedItems();
+        renderEquipmentInventory();
+        renderItemInventory();
+        renderSkillTree();
+    }
+
+    // --- Logika Interaksi ---
+    function equipItem(itemToEquip) {
+        if (currentPlayer.equipment[itemToEquip.type]) {
+            alert(`Slot ${itemToEquip.type} sudah terisi.`);
+            return;
+        }
+        currentPlayer.equipment[itemToEquip.type] = itemToEquip;
+        currentPlayer.equipmentInventory = currentPlayer.equipmentInventory.filter(item => item.id !== itemToEquip.id);
+        loadCharacterDetails();
+    }
+
+    equipInventoryList.addEventListener('click', (e) => {
+        const infoDiv = e.target.closest('.equip-item-info');
+        const removeBtn = e.target.closest('.remove-equip-btn');
+        if (removeBtn) {
+            const itemId = parseInt(removeBtn.dataset.itemId);
+            if (confirm("Are you sure you want to delete this equipment permanently?")) {
+                currentPlayer.equipmentInventory = currentPlayer.equipmentInventory.filter(item => item.id !== itemId);
+                renderEquipmentInventory();
+            }
+        } else if (infoDiv) {
+            const itemId = parseInt(infoDiv.dataset.itemId);
+            const itemToEquip = currentPlayer.equipmentInventory.find(item => item.id === itemId);
+            if (itemToEquip) equipItem(itemToEquip);
+        }
+    });
+
+    document.querySelector('.equipment-panel').addEventListener('click', (e) => {
+        if (e.target.classList.contains('unequip-btn')) {
+            const slotName = e.target.dataset.slot;
+            const itemToUnequip = currentPlayer.equipment[slotName];
+            if (itemToUnequip) {
+                currentPlayer.equipmentInventory.push(itemToUnequip);
+                currentPlayer.equipment[slotName] = null;
+                loadCharacterDetails();
+            }
+        }
+    });
+    
+    statsContainer.addEventListener('click', (e) => {
+        if (e.target.classList.contains('stat-change-btn')) {
+            const statName = e.target.dataset.stat;
+            const amount = parseInt(e.target.dataset.amount);
+            currentPlayer.stats[statName] += amount;
+            renderStats();
+        }
+    });
+
+    // --- Logika Modal & Form ---
+    function addStatInput() { /* ... (Fungsi ini tidak berubah) ... */ }
+    createEquipBtn.addEventListener('click', () => { /* ... */ });
+    closeEquipModal.addEventListener('click', () => { /* ... */ });
+    addStatBtn.addEventListener('click', addStatInput);
+    
+    equipForm.addEventListener('submit', (e) => {
+        e.preventDefault();
+        const stats = [];
+        equipStatsContainer.querySelectorAll('.stat-input-group').forEach(group => {
+            stats.push({ stat: group.querySelector('.stat-type').value, value: parseInt(group.querySelector('.stat-value').value) });
+        });
+        const newEquipment = { id: Date.now(), name: document.getElementById('equip-name').value, type: document.getElementById('equip-type').value, rarity: document.getElementById('equip-rarity').value, stats: stats, passive: document.getElementById('equip-passive').value };
+        currentPlayer.equipmentInventory.push(newEquipment);
+        renderEquipmentInventory();
+        equipModal.classList.add('hidden');
+        equipForm.reset();
+    });
+
+    function showSkillDetails(skillId, isLearning) { /* ... */ }
+    learnSkillBtn.addEventListener('click', () => { /* ... */ });
+    confirmLearnSkillBtn.addEventListener('click', () => { /* ... */ });
+    closeSkillModal.addEventListener('click', () => { /* ... */ });
+    imageUploadInput.addEventListener('change', (event) => { /* ... */ });
+    addItemBtn.addEventListener('click', () => { /* ... */ });
+
+    // --- Tombol Simpan ---
+    saveBtn.addEventListener('click', async () => {
+        const playerRef = doc(db, "players", playerId);
+        
+        // Buat objek data yang akan diupdate
+        const dataToUpdate = {
+            description: description.value,
+            level: parseInt(levelInput.value),
+            "inventory.gold": parseInt(goldInput.value),
+            "inventory.items": currentPlayer.inventory.items,
+            equipment: currentPlayer.equipment,
+            equipmentInventory: currentPlayer.equipmentInventory,
+            skills: currentPlayer.skills,
+            stats: currentPlayer.stats
+        };
+
+        if (newImageBase64) {
+            dataToUpdate.image = newImageBase64;
+        }
+
+        try {
+            await updateDoc(playerRef, dataToUpdate);
+            alert('Character details saved to Firebase!');
+            newImageBase64 = null;
+        } catch (error) {
+            console.error("Error updating character: ", error);
+            alert('Failed to save character. Check console for details.');
+        }
+    });
+
+    // --- Fungsi Inisialisasi Utama ---
+    async function initializeApp() {
+        const playerRef = doc(db, "players", playerId);
+        const playerSnap = await getDoc(playerRef);
+
+        if (playerSnap.exists()) {
+            currentPlayer = { id: playerSnap.id, ...playerSnap.data() };
+            // Inisialisasi properti jika tidak ada di database
+            if (!currentPlayer.equipmentInventory) currentPlayer.equipmentInventory = [];
+            if (!currentPlayer.inventory) currentPlayer.inventory = { gold: 0, items: [] };
+            if (!currentPlayer.equipment) currentPlayer.equipment = { helmet: null, armor: null, shoulder: null, weapon: null, leggings: null, shoes: null };
+            if (!currentPlayer.skills) currentPlayer.skills = [];
+
+            // Muat semua skill
+            const skillsSnapshot = await getDocs(collection(db, "skills"));
+            allSkills = skillsSnapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
+
+            loadCharacterDetails();
+        } else {
+            document.body.innerHTML = '<h1>Character not found in database.</h1>';
+        }
+    }
+
+    initializeApp();
+
+    // --- Salin ulang sisa fungsi yang tidak berubah di sini agar lengkap ---
+    function renderItemInventory() { inventoryList.innerHTML = ''; if (!currentPlayer.inventory.items || currentPlayer.inventory.items.length === 0) { inventoryList.innerHTML = '<li style="color: #888; justify-content: center;">Empty</li>'; } else { currentPlayer.inventory.items.forEach((item, index) => { const li = document.createElement('li'); li.textContent = item; const removeBtn = document.createElement('button'); removeBtn.className = 'remove-item-btn'; removeBtn.innerHTML = '&times;'; removeBtn.onclick = () => { currentPlayer.inventory.items.splice(index, 1); renderItemInventory(); }; li.appendChild(removeBtn); inventoryList.appendChild(li); }); } }
+    function renderSkillTree() { skillTreeContainer.innerHTML = ''; currentPlayer.skills.forEach(skillInfo => { const node = document.createElement('div'); node.className = 'skill-node'; node.textContent = skillInfo.name; node.dataset.skillId = skillInfo.id; node.addEventListener('click', () => showSkillDetails(skillInfo.id, false)); skillTreeContainer.appendChild(node); }); }
+    function addStatInput() { const div = document.createElement('div'); div.className = 'stat-input-group'; div.innerHTML = `<select class="stat-type"><option value="str">STR</option><option value="agi">AGI</option><option value="dex">DEX</option><option value="def">DEF</option><option value="con">CON</option><option value="int">INT</option></select><input type="number" class="stat-value" placeholder="Value" required>`; equipStatsContainer.appendChild(div); }
+    createEquipBtn.addEventListener('click', () => { equipStatsContainer.innerHTML = ''; addStatInput(); equipModal.classList.remove('hidden'); });
+    closeEquipModal.addEventListener('click', () => equipModal.classList.add('hidden'));
+    addStatBtn.addEventListener('click', addStatInput);
+    function showSkillDetails(skillId, isLearning) { const skill = allSkills.find(s => s.id === skillId); if(!skill) return; skillModalTitle.textContent = skill.name; let effectHtml = ''; switch (skill.type) { case 'damage': effectHtml = `Damage: ${skill.effect.base} + ${skill.effect.percent}% ${skill.effect.stat?.toUpperCase() || ''}`; break; case 'buff': effectHtml = `Target: ${skill.effect.target}. Efek: `; if(skill.effect.type === 'stat_increase') effectHtml += `+${skill.effect.percent}% ${skill.effect.stat?.toUpperCase() || ''}`; else if(skill.effect.type === 'hp_recovery') effectHtml += `Pulihkan ${skill.effect.percent}% HP`; else if(skill.effect.type === 'debuff_removal') effectHtml += `Hilangkan Debuff`; break; case 'debuff': effectHtml = `Efek: `; if(skill.effect.type === 'stat_reduction') effectHtml += `-${skill.effect.percent}% ${skill.effect.stat?.toUpperCase() || ''}`; else if(skill.effect.type === 'dot') effectHtml += `-${skill.effect.percent}% HP/detik`; break; } skillModalBody.innerHTML = `<p><strong>${(skill.category || '').toUpperCase()}</strong></p><p><em>${effectHtml}</em></p><p>${skill.desc || 'No description.'}</p>`; confirmLearnSkillBtn.classList.add('hidden'); skillModal.classList.remove('hidden'); }
+    learnSkillBtn.addEventListener('click', () => { skillModalTitle.textContent = "Learn New Skill"; const playerSkillIds = new Set(currentPlayer.skills.map(s => s.id)); const learnableSkills = allSkills.filter(s => s.for === 'player' && !playerSkillIds.has(s.id)); skillModalBody.innerHTML = ''; if (learnableSkills.length > 0) { learnableSkills.forEach(skill => { skillModalBody.innerHTML += `<label><input type="checkbox" value="${skill.id}" data-name="${skill.name}"> ${skill.name}</label>`; }); confirmLearnSkillBtn.classList.remove('hidden'); } else { skillModalBody.innerHTML = '<p style="text-align: center; color: #888;">All skills learned.</p>'; confirmLearnSkillBtn.classList.add('hidden'); } skillModal.classList.remove('hidden'); });
+    confirmLearnSkillBtn.addEventListener('click', () => { skillModalBody.querySelectorAll('input:checked').forEach(checkbox => { currentPlayer.skills.push({ id: checkbox.value, name: checkbox.dataset.name }); }); renderSkillTree(); skillModal.classList.add('hidden'); });
+    closeSkillModal.addEventListener('click', () => skillModal.classList.add('hidden'));
+    imageUploadInput.addEventListener('change', (event) => { const file = event.target.files[0]; if (!file) return; const reader = new FileReader(); reader.onloadend = () => { newImageBase64 = reader.result; imagePreview.src = newImageBase64; }; reader.readAsDataURL(file); });
+    addItemBtn.addEventListener('click', () => { const itemName = newItemInput.value.trim(); if (itemName) { currentPlayer.inventory.items.push(itemName); renderItemInventory(); newItemInput.value = ''; } });
+});
